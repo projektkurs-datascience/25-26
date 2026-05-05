@@ -45,4 +45,4 @@ For more Problem Sets and a thourough description of RTutor visit: https://githu
 
 # Sources & Attributions
 
-- The problem sets have been created by [Julius Düker](https://github.com/juduke/), [Sebastian Kranz](https://github.com/skranz) and [Alexander Rieber](https://github.com/AlexRieber) and recently updated (October 2024) by [Dennis Steinle](https://github.com/DennisSteinle)
+- The problem sets have been created by [Julius Düker](https://github.com/juduke/), [Sebastian Kranz](https://github.com/skranz) and [Alexander Rieber](https://github.com/AlexRieber) and updated (October 2024) by [Dennis Steinle](https://github.com/DennisSteinle)

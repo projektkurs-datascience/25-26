@@ -21,6 +21,10 @@ Hier finden Sie Folien als PDFs zum Download:
 - [Guidelines für die Visualisierung](slides/visualisierung-guidelines.pdf)
 - [Korrelation](slides/correlation.pdf)
 - [Advanced R Markdown](slides/advanced_rmarkdown.pdf)
+- [Stichprobe vs. Grundgesamtheit](slides/sample-vs-population.pdf)
+- [Koeffizienten Interpretieren](slides/Koeffizienten_Interpretieren.pdf)
+- [Erste Eindrücke zu Kausalität](slides/causality1.pdf)
+- [Directed acyclic graphs](slides/DAG_video.pdf)
 
 # Vorlesungen
 
@@ -28,3 +32,12 @@ Hier finden Sie Folien als PDFs zum Download:
 - [Case-Study Teil 1](slides/VL_case-study-Teil1.pdf)
 - [Case-Study Teil 2](slides/VL_case-study-Teil2.pdf)
 - [KI und Projekte](slides/VL_KI_und_Projekte.pdf)
+- [Einführungsveranstaltung zum 2. Teil](slides/intro_projektkurs_data-science2.pdf)
+- [Wahrscheinlichkeiten und Konfidenzintervalle](slides/probability-and-confidence-interval.pdf)
+- [Inferenzstatistik](slides/inference.pdf)
+- [Lineare Regression](slides/linear-regression.pdf)
+- [Case-Study Teil 3](slides/VL_case-study-Teil3.pdf)
+- [Kausalität in den Wirtschaftswissenschaften](slides/DAG_slides.pdf)
+- [Randomisiertes Experiment](slides/Experiment_slides.pdf)
+- [Instrumentalvariablen](slides/instruments.pdf)
+- [Maschinelles Lernen](slides/machine_learning.pdf)

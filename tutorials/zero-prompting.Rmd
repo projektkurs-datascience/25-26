@@ -1,0 +1,1074 @@
+---
+title: "LLM-basierte Textanalyse mit ellmer und der GWDG Chat-AI"
+subtitle: "Eine Einführung in Zero-Shot-Klassifikation"
+output:
+  html_document:
+    theme: cosmo
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>"
+)
+
+# Projektwurzel relativ zum Rmd (docs/ liegt eine Ebene tiefer).
+projekt_root <- normalizePath(file.path(dirname(knitr::current_input(dir = TRUE)), ".."))
+
+# .Renviron aus dem Projektwurzelverzeichnis nachladen, damit der
+# GWDG-Key in der Knit-Session zur Verfügung steht. R liest die Datei
+# beim Start automatisch ein - dieser Aufruf greift, wenn das knit aus
+# einem anderen Arbeitsverzeichnis gestartet wird.
+renviron_pfad <- file.path(projekt_root, ".Renviron")
+if (file.exists(renviron_pfad)) readRenviron(renviron_pfad)
+
+# Cache-Verzeichnis für die Live-Klassifikation. Das RDS unter
+# `cache_pfad` ist die "Ground Truth" für den Knit: einmal gefüllt,
+# wird beim nächsten Knit kein zusätzlicher API-Call verbrannt.
+cache_dir  <- file.path(projekt_root, "output", "zero-prompting")
+cache_pfad <- file.path(cache_dir, "klassifikation_cache.rds")
+dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Datenpfad für die Augsburg-Beispielanzeigen.
+augsburg_pfad <- file.path(projekt_root, "data", "ba_eigene", "Augsburg_text.rds")
+```
+
+Wer Stellenanzeigen analysieren will, steht vor einem klassischen
+Textanalyse-Problem: Aus unstrukturiertem Freitext sollen
+strukturierte Variablen entstehen. Wird KI verlangt? Welcher
+Abschluss wird gefordert? Welche Sprachen? Manuelles Lesen ist
+genau, aber teuer; einfache Wörterbuch-Verfahren sind billig, aber
+ungenau.
+
+Large Language Models (LLMs) wie das über die GWDG bereitgestellte
+**Qwen 3.5-122B** können Stellenanzeigen kontextuell verstehen und
+solche Klassifikationen vornehmen, ohne dass wir sie vorher auf
+unsere spezifische Aufgabe trainieren. Diese Fähigkeit nennt sich
+**Zero-Shot Learning**.
+
+In diesem Tutorial lernen Sie end-to-end:
+
+1. was eine API ist und warum wir LLMs darüber ansprechen,
+2. wie die GWDG Chat-AI aufgebaut ist und wo Sie einen Schlüssel
+   beziehen,
+3. wie das R-Paket `ellmer` die API-Mechanik kapselt,
+4. wie **strukturierte Outputs** mit `type_object()` Ihnen typsicheres
+   JSON statt selbstgebauter Parser liefern,
+5. wie Sie das Ganze auf viele Anzeigen **parallelisieren und batchen**,
+6. wie Sie die Ergebnisse für eine Aggregation auf Wort-Ebene
+   **aufbereiten**.
+
+Als laufendes Beispiel klassifizieren wir Stellenanzeigen mit einem
+**bewusst kleinen Schema** (drei, vier Felder, die alle Type-
+Konstruktoren von `ellmer` illustrieren). Das vollständige Schema
+Ihrer Workshop-Projektarbeit ist umfangreicher und enthält weitere
+Felder zu Bildung, Erfahrung, Skill-Profilen und Arbeitsbedingungen.
+Welche das im Detail sind, entscheiden Sie in der Projektarbeit
+selbst - das hier ist die Einführung in die Mechanik, nicht das
+fertige Schema.
+
+## Was sind Large Language Models und Zero-Shot Prompting?
+
+### Large Language Models verstehen
+
+LLMs sind Modelle, die auf riesigen Textmengen trainiert wurden und
+dadurch ein tiefes Verständnis von Sprache entwickelt haben. Sie
+funktionieren grundsätzlich wie eine sehr intelligente Text-
+vervollständigung - sie generieren den wahrscheinlichsten nächsten
+Text.
+
+Der entscheidende Unterschied zu früheren NLP-Methoden:
+
+- **Traditionelle Methoden** (z.B. naive Bayes oder Stichwort-Listen):
+  Benötigen Trainingsdaten oder handgepflegte Lexika für jede
+  spezifische Aufgabe.
+- **Generative LLMs:** Können neue Aufgaben allein durch eine klare
+  Anweisung in natürlicher Sprache lösen.
+
+### Zero-Shot Prompting
+
+**Zero-Shot** bedeutet, dass das Modell eine Aufgabe löst, **ohne
+vorher Beispiele für diese Aufgabe gesehen zu haben**. Stattdessen
+geben wir ihm klare Anweisungen.
+
+Beispiel:
+
+```
+Prompt:  "Lies die folgende Stellenanzeige und beantworte:
+          Wird Künstliche Intelligenz als Anforderung an die
+          Bewerber:innen verlangt? Antworte mit 'ja' oder 'nein'.
+
+          Stellenanzeige: 'Wir suchen einen Data Scientist mit
+          Erfahrung in Python, SQL und Machine-Learning-Modellen.'"
+
+Antwort: "ja"
+```
+
+Das Modell "weiß" bereits, was die Begriffe bedeuten und kann die
+Anzeige inhaltlich einordnen, ohne dass wir vorher Trainingsdaten
+zur Verfügung stellen mussten.
+
+## 1. Was ist eine API?
+
+Wer einen Chatbot wie ChatGPT oder Chat-AI im Browser nutzt, tippt
+eine Frage in ein Eingabefeld und liest die Antwort auf dem
+Bildschirm. Für eine einzelne Frage ist das bequem. Für 400
+Stellenanzeigen oder 50.000 Kundenbewertungen ist es untragbar -
+und vor allem: nicht reproduzierbar.
+
+Eine **API (Application Programming Interface)** ist der
+programmatische Zugang zu genau demselben Modell. Statt Text in ein
+Browserfenster zu tippen, schickt ein R-Skript eine HTTP-Anfrage an
+einen Server. Die Antwort kommt als strukturierte Daten zurück -
+direkt in ein R-Objekt, ohne Copy-Paste, ohne manuelles Klicken.
+
+| | Browser-Chat | API-Zugriff |
+|---|---|---|
+| Eingabe | Mensch tippt | Skript sendet Anfrage |
+| Ausgabe | Text am Bildschirm | JSON in R-Objekt |
+| Geeignet für | Einzelfragen | Hunderte/Tausende Anfragen |
+| Reproduzierbar | Nein | Ja (Code + Seed + Modellversion) |
+
+Konzeptuell besteht jeder API-Call aus zwei Teilen:
+
+- **Anfrage** (Request): URL, HTTP-Header (inkl. Schlüssel),
+  Modellwahl, der eigentliche Prompt, Parameter wie `temperature`.
+- **Antwort** (Response): HTTP-Status (200 = OK, 429 = Rate-Limit,
+  5xx = Server-Fehler) plus ein JSON-Body mit dem generierten Text
+  oder, bei strukturierten Outputs, einem getypten Datensatz.
+
+Genau diese Mechanik schauen wir uns gleich an - zuerst aber den
+Anbieter, mit dem wir arbeiten.
+
+## 2. Die GWDG / Chat AI
+
+Die **GWDG** (Gesellschaft für wissenschaftliche Datenverarbeitung
+mbH Göttingen) ist das gemeinsame Rechenzentrum der Universität
+Göttingen und der Max-Planck-Gesellschaft. Sie betreibt unter dem
+Namen **Chat AI** einen LLM-Dienst, der
+
+- **für deutsche Hochschulen kostenlos** nutzbar ist (Sie zahlen
+  nichts, brauchen aber einen Hochschul-Account),
+- **mit Servern in Deutschland** läuft - relevant, sobald Sie
+  Forschungs- oder Studierendendaten verarbeiten,
+- mehrere offene Modelle anbietet (Qwen, Llama, Mistral u.a.),
+  Stand 2026 ist Qwen 3.5-122B der Default für deutsche Texte.
+
+Drei technische Begriffe, die uns gleich begegnen:
+
+- **Basis-URL:** `https://chat-ai.academiccloud.de/v1` ist der
+  Einstiegspunkt aller API-Calls.
+- **OpenAI-kompatibel:** Die GWDG spricht dasselbe API-Protokoll wie
+  OpenAI. Konsequenz: Jeder Client, der für OpenAI funktioniert,
+  lässt sich mit der GWDG-Basis-URL umlenken. Wir nutzen das gleich
+  aus.
+- **API-Schlüssel / Bearer-Token:** Ihr persönliches Passwort
+  gegenüber der API. Es wird im HTTP-Header
+  `Authorization: Bearer <key>` mitgesendet und identifiziert Sie
+  für Quota und Abrechnung.
+
+Verfügbare Modelle und ihre Token-Grenzen sind unter
+<https://docs.hpc.gwdg.de/services/chat-ai/models/index.html>
+dokumentiert.
+
+### GWDG Rate-Limits im Überblick
+
+Ihr persönlicher Key hat klar definierte Grenzen (Stand 2026):
+
+| Fenster | Limit |
+|---|---|
+| Minute | 10 Calls |
+| Stunde | 200 Calls |
+| Tag    | 400 Calls |
+| Monat  | 3.000 Calls |
+
+Für ein 400er-Anzeigen-Subsample reicht das genau für eine Tagesquota - wenn nichts
+schiefgeht. Wer Probeläufe wiederholt, sollte deshalb das
+**Monatslimit** im Blick behalten. Das aktuelle Restbudget können
+Sie jederzeit per leerem Probe-Call abfragen; den Curl-Trick
+beschreibt **Anhang A**.
+
+## 3. Schlüssel beziehen und sicher ablegen
+
+Den persönlichen Schlüssel beantragen Sie über das
+**GWDG-Hochschulportal**. Sie bekommen eine Zeichenkette - das ist
+Ihr Passwort und gehört wie ein Passwort behandelt.
+
+### Niemals im Klartext im Code
+
+Drei konkrete Risiken:
+
+1. **Git.** Sobald ein Klartext-Schlüssel in einem Commit landet,
+   bleibt er in der Historie, auch wenn Sie ihn später wieder
+   herausnehmen. Auf einem öffentlichen Repository wird er
+   innerhalb von Minuten von Bots gescraped und für fremde Calls
+   missbraucht.
+2. **Bots / geteilte Repositorien.** Selbst in privaten Repos lesen
+   CI/CD-Pipelines, Backups oder Team-Mitglieder Ihren Code. Ein im
+   Skript stehender Key gilt damit als kompromittiert.
+3. **Geteilte Quota.** Ihr Key zählt gegen Ihr persönliches Limit.
+   Wer ihn in fremde Hände bekommt, verbrennt Ihre Tagesquota.
+
+### .Renviron im Projektwurzelverzeichnis
+
+Die Standardlösung in R: eine `.Renviron`-Datei im Wurzel-
+verzeichnis Ihres Projekts. R liest sie beim Start automatisch ein
+und exportiert die Variablen in die Umgebung.
+
+```bash
+# in ./.Renviron im Projektwurzelverzeichnis
+GWDG_API_KEY=ihr-eigener-key
+```
+
+Und dieselbe Datei in die `.gitignore` aufnehmen, damit sie nie in
+einen Commit gerät:
+
+```
+# .gitignore
+.Renviron
+```
+
+### Zugriff im R-Code
+
+Im Code lesen Sie den Wert mit `Sys.getenv()`, ohne ihn jemals zu
+printen:
+
+```{r, eval=FALSE}
+api_key <- Sys.getenv("GWDG_API_KEY")
+nzchar(api_key)   # TRUE, wenn der Key geladen ist - ohne den Wert anzuzeigen
+```
+
+`nzchar()` gibt nur `TRUE`/`FALSE` zurück und ist die richtige
+Prüfung, um den Schlüssel **nicht versehentlich in die Konsole zu
+schreiben**.
+
+### Wenn der Wert leer ist
+
+Die `.Renviron` wird nur **beim R-Start** eingelesen. Wenn Sie sie
+nachträglich anlegen oder ändern, ist der Wert noch nicht aktiv.
+Zwei Wege zur Aktivierung:
+
+```{r, eval=FALSE}
+# Variante 1: R-Session neu starten (Session > Restart R)
+
+# Variante 2: explizit nachladen
+readRenviron(here::here(".Renviron"))
+```
+
+`here::here()` löst den Pfad relativ zum Projektwurzelverzeichnis
+auf - so funktioniert die Zeile auch dann, wenn das aktuelle
+Arbeitsverzeichnis tiefer im Projekt liegt.
+
+## 4. ellmer als Wrapper
+
+Im Prinzip könnten Sie API-Calls mit `httr2` selbst zusammenbauen:
+Header setzen, JSON serialisieren, Statuscodes prüfen, bei `429`
+(Rate-Limit) und `5xx` (Server-Fehler) selbst warten und neu
+versuchen, die Antwort parsen, Schema-Fehler abfangen. Das ist viel
+Boilerplate, die in jeder Analyse gleich aussieht - und gerne
+fehlerhaft ist.
+
+Das Paket **`ellmer`** (Posit, tidyverse-Stil) übernimmt diese
+Schicht. Sie konfigurieren einmal ein Chat-Objekt; danach gehen
+alle Calls über vier-fünf Helfer. Was Sie konkret geschenkt
+bekommen:
+
+- **Einheitliches Provider-Interface.** Dieselben Funktionen für
+  OpenAI, Anthropic, Google, OpenAI-kompatible Endpunkte wie die
+  GWDG, lokale Ollama-Modelle. Anbieterwechsel = eine Zeile
+  (`chat_openai()` → `chat_anthropic()`), nicht ein Refactoring.
+- **Automatisches Retry bei 429 und 5xx.** Rate-Limit-Antworten und
+  transiente Server-Fehler werden mit exponentiellem Backoff von
+  alleine wiederholt. Kein `tryCatch`-Loop von Hand.
+- **Strukturierte Outputs.** Sie deklarieren ein Schema; `ellmer`
+  zwingt das Modell, valides JSON in genau dieser Form zu liefern,
+  und gibt das Ergebnis als getypte R-Liste zurück. Detail im
+  nächsten Abschnitt.
+- **Streaming, Async, Parallelisierung, Tool-Use.** Lange Antworten
+  Token-für-Token streamen; viele unabhängige Calls parallel
+  abfeuern (`parallel_chat_structured()`); Funktionsaufrufe durch
+  das Modell (Tool-Use) sind eingebaut.
+
+Für die Beispiele hier laden wir drei Pakete:
+
+```{r}
+library(ellmer)      # LLM-Wrapper
+library(tidyverse)
+library(here)        # Robuste Pfadangaben
+```
+
+## 5. Strukturierte Outputs mit `type_object()`
+
+Der naheliegende Versuch ist, das Modell um JSON zu bitten und die
+Antwort mit `jsonlite::fromJSON()` zu parsen. Das funktioniert
+oft, scheitert aber regelmäßig:
+
+- Das Modell rutscht in einen ` ```json ... ``` `-Wrapper.
+- Es lässt ein Feld weg.
+- Es gibt einen Wert zurück, den Ihr Code nicht kennt (`"PhD"`
+  statt `"master_oder_hoeher"`, `"sehr gut"` statt `"positiv"`).
+
+Sie brauchen dann Wrapper-Strip-Logik, Fallback-NAs, Typ-
+konvertierungen. Bei 10 Anzeigen ärgerlich, bei 400 unhaltbar.
+
+`ellmer::type_object()` löst das eleganter: Sie deklarieren ein
+**Schema**, und `ellmer` zwingt das Modell **serverseitig**,
+valides JSON in genau dieser Form zu liefern. Das Ergebnis kommt
+als R-Liste mit echten Datentypen - **kein manuelles `fromJSON()`,
+kein Fallback nötig**.
+
+Vier Type-Konstruktoren reichen für fast alles:
+
+| Konstruktor | R-Typ in der Antwort | Verwendung |
+|---|---|---|
+| `type_string()`             | character (Länge 1) | Freitext, Zitate |
+| `type_boolean()`            | logical (Länge 1)   | Ja/Nein-Fragen |
+| `type_enum(c(...))`         | character (Länge 1), nur deklarierte Werte | Kategorien |
+| `type_array(type_string())` | character vector    | Listen |
+
+### Mini-Beispiel: ein schlankes Anzeigen-Schema
+
+Wir bauen ein bewusst minimales Beispielschema mit vier Feldern. Damit sollen alle vier Type-Konstruktoren zu illustriert werden:
+
+```{r anzeige-schema}
+anzeige_schema <- type_object(
+  ai_required = type_boolean("Wird KI als echte Anforderung an die Bewerber:innen verlangt?"),
+  ai_evidence = type_string("Wörtliches Zitat aus der Anzeige, das die KI-Anforderung belegt - oder leer."),
+  bildung     = type_enum(c("keine", "ausbildung", "studium", "unklar"),
+                          description = "Grob geforderter Abschluss"),
+  sprachen    = type_array(type_string(),
+                           description = "Im Text genannte geforderte Sprachen")
+)
+```
+
+> Das ist **kein** vollständiges Projekt-Schema, sondern ein
+> Tutorial-Mini-Schema. In Ihrer Projektarbeit werden Sie weitere
+> Felder ergänzen (z.B. Skill-Profile, Erfahrungsdauer,
+> Arbeitsbedingungen) und die `bildung`-Enum feiner stufen. Welche
+> Felder das genau sind, entscheiden Sie in der Projektarbeit selbst.
+
+**Warum das `ai_evidence`-Feld?** Wenn das Modell für seine
+Klassifikation ein **wörtliches Zitat aus der Anzeige** angeben
+muss, klassifiziert es spürbar konservativer: False Positives
+gehen zurück, weil das Modell sonst nichts zum Zitieren findet.
+Das Feld nennt sich in der Literatur "Grounding" und es zwingt das
+Modell, die Entscheidung an einem konkreten Beleg festzumachen. 
+Zusätzlich liefert es Ihnen für die spätere Validierung gleich mit, **woran**
+das Modell die Klassifikation festgemacht hat.
+
+Wir rufen das Schema gegen eine Beispiel-Anzeige auf, die
+Konfiguration des `chat`-Objekts kommt im nächsten Abschnitt:
+
+```{r, eval=FALSE}
+beispiel_text <- "Wir suchen eine Data Scientistin mit abgeschlossenem
+Studium in Informatik, mindestens 3 Jahren Erfahrung in Python und
+Machine Learning sowie sehr guten Deutsch- und Englischkenntnissen."
+
+ergebnis <- chat$clone()$chat_structured(beispiel_text, type = anzeige_schema)
+str(ergebnis)
+#> List of 4
+#>  $ ai_required: logi TRUE
+#>  $ ai_evidence: chr "Erfahrung in Python und Machine Learning"
+#>  $ bildung    : chr "studium"
+#>  $ sprachen   : chr [1:2] "Deutsch" "Englisch"
+```
+
+`ergebnis` ist eine echte R-Liste:
+
+- Das Enum-Feld kann **nur einen** der vier deklarierten Werte
+  annehmen - `"Master"` oder `"PhD"` geht nicht.
+- Booleans sind `TRUE`/`FALSE`, keine `"true"`-Strings.
+- Arrays sind echte Charactervektoren.
+- Pflichtfelder sind garantiert vorhanden, sonst wirft
+  `chat_structured()` einen Fehler.
+
+Genau dasselbe Muster - Schema deklarieren, `chat_structured()`
+aufrufen, R-Liste zurückbekommen - wenden Sie auf das umfangreichere
+Schema Ihrer Projektarbeit an.
+
+## 6. Verbindung und Test
+
+Bleibt der Zusammenbau: ein `chat`-Objekt, das die GWDG-Verbindung
+kapselt. `ellmer` bietet für jeden Anbieter eine eigene
+`chat_*()`-Funktion; für OpenAI-kompatible Endpunkte wie die
+GWDG nutzen wir **`chat_openai_compatible()`**. Sie verwendet
+`/v1/chat/completions` und kommt damit auch mit Anbietern klar, die
+die neuere `/v1/responses`-API (Standard bei `chat_openai()`) nicht
+implementieren.
+
+```{r chat-setup}
+# .Renviron sicherstellen
+api_key <- Sys.getenv("GWDG_API_KEY")
+stopifnot(nzchar(api_key))
+
+# Ein bewusst schlanker System-Prompt fürs Tutorial. In Ihrer
+# Projektarbeit ergänzen Sie hier weitere Definitionen, Abgrenzungen
+# und Negativbeispiele, um die typischen Fehlklassifikationen Ihrer
+# Aufgabe präventiv zu adressieren.
+system_prompt <- paste(
+  "Du bist ein präziser Annotator für deutschsprachige Stellenanzeigen.",
+  "Bewerte ausschließlich, was im Anzeigentext steht;",
+  "rate nicht und ergänze keine Informationen, die nicht belegbar sind.",
+  "Wenn ein Feld nicht aus dem Text hervorgeht, wähle den neutralen",
+  "oder Fallback-Wert (z.B. 'unklar')."
+)
+
+chat <- chat_openai_compatible(
+  base_url      = "https://chat-ai.academiccloud.de/v1",
+  name          = "GWDG Chat AI",
+  model         = "qwen3.5-122b-a10b",
+  credentials   = function() list(Authorization = paste("Bearer", api_key)),
+  system_prompt = system_prompt,
+  params        = params(temperature = 0),
+  echo          = "none"
+)
+```
+
+Ein kurzer Smoke-Test, ob die Verbindung steht - auf einem geklonten
+Chat, damit die Turn-Historie für die spätere Klassifikation
+unberührt bleibt:
+
+```{r chat-smoketest}
+chat$clone()$chat("Sag Hallo und nenne deinen Modellnamen.")
+```
+
+Vier Bausteine dieser Verbindung verdienen einen genaueren Blick -
+sie sind die `ellmer`-Idiome, die Sie immer wieder einsetzen werden.
+
+### Die `credentials`-Funktion statt `api_key`-Parameter
+
+Ab `ellmer` 0.4.0 ist der direkte `api_key`-Parameter deprecated;
+stattdessen übergeben Sie eine **Funktion**, die eine Liste von
+HTTP-Headern zurückgibt:
+
+```{r, eval=FALSE}
+credentials = function() list(Authorization = paste("Bearer", api_key))
+```
+
+Was bringt das? Die Funktion wird **bei jedem Call neu
+ausgewertet**. Das ist sinnvoll, wenn der Key während einer langen
+Session rotiert wird. Außerdem klemmt der Key dadurch nirgends im
+Chat-Objekt fest, wo er sich versehentlich mit `print(chat)` zeigen
+ließe.
+
+### `chat$clone()` für isolierte Smoke-Tests
+
+`ellmer`-Chats halten eine **Turn-Historie** im Objekt. Jeder
+weitere Call sieht die vorherigen Turns als Kontext. Das ist
+meistens gewünscht (mehrstufige Dialoge), bei Klassifikation aber
+schädlich: Wenn der Smoke-Test im Kontext einer späteren
+Klassifikation auftaucht, kann das Modell daraus In-Context lernen
+und systematisch abweichen.
+
+`chat$clone()` gibt ein **frisches Chat-Objekt mit derselben
+Konfiguration, aber leerer Turn-Historie** zurück. Routinemäßig für
+jeden Test- oder Einzel-Call nutzen:
+
+```{r, eval=FALSE}
+# Der Smoke-Test schädigt das Original-chat-Objekt NICHT
+chat$clone()$chat("Sag Hallo und nenne deinen Modellnamen.")
+```
+
+Bei `parallel_chat_structured()` (weiter unten) ist der Klon nicht
+nötig, die Funktion startet je Prompt von einem leeren Zustand.
+
+### Reproduzierbarkeit: `params(temperature = 0)`
+
+Bei `temperature = 0` wählt das Modell immer den wahrscheinlichsten
+nächsten Token. Antworten sind dann **so nah an deterministisch wie
+ein LLM kommt**: derselbe Prompt produziert (fast) dasselbe
+Ergebnis. Höhere Temperatur-Werte führen zu kreativeren, aber
+wechselnden Antworten; schlecht für die Klassifikation.
+
+Beachten Sie: `temperature` ist **kein** Wurzel-Parameter der
+`chat_*()`-Funktionen. Sie reichen ihn über den `params`-Helper
+durch:
+
+```{r, eval=FALSE}
+chat_openai_compatible(
+  ...,
+  params = params(temperature = 0)
+)
+```
+
+`params()` baut intern die plattformkonforme Parameter-Liste,
+sodass sich derselbe Code mit minimaler Anpassung auch für andere
+Anbieter nutzen lässt.
+
+### `echo = "none"` - Konsole sauber halten
+
+Beim Klassifizieren vieler Texte wollen Sie nicht jede Antwort in
+die Konsole gestreamt sehen. `echo = "none"` schaltet das Streaming
+ab; die Antwort kommt als Rückgabewert, nicht als Seitenausgabe.
+
+## Prompt-Engineering: Was macht einen guten Prompt aus?
+
+Basierend auf de Kok (2025) sollten Sie folgende Prinzipien
+beachten:
+
+1. **Spezifisch und eindeutig.** "Bewerte das KI-Anforderungsprofil"
+   ist besser als "Analysiere den Text".
+2. **Kontextualisierung.** Sagen Sie dem Modell, woher der Text
+   kommt ("dies ist eine deutsche Stellenanzeige aus der
+   BA-Jobbörse").
+3. **Ausgabeformat definieren.** Mit `type_object()` fällt das weg -
+   Sie erzwingen das Format strukturell.
+4. **Temperatur bestimmen.** `temperature = 0` für
+   Reproduzierbarkeit. Höhere Werte führen zu kreativeren, aber
+   wechselnden Antworten.
+5. **Chain-of-Thought über ein Evidence-Feld.** Ein Pflicht-Feld
+   wie `evidence` ("wörtliches Zitat als Beleg") zwingt das Modell,
+   seine Entscheidung an einer Textstelle festzumachen, und
+   verbessert die Qualität spürbar.
+6. **Falsch-Positiven Fällen präventiv vorbeugen.** Wenn Sie
+   wissen, welcher Fehler systematisch passiert (z.B. Marketing-
+   Floskeln werden als echte Anforderung gelesen), adressieren Sie
+   das im System-Prompt direkt. Präventive Hinweise sind oft
+   wirksamer als nachträgliche Korrektur.
+
+## 7. Viele Anfragen robust verarbeiten
+
+Eine einzelne Anzeige über `chat_structured()` ist nett, aber 100
+oder 400 Anzeigen würden mit einer `for`-Schleife viel zu lange
+dauern und ein einziger Aussetzer würde den ganzen Lauf
+abbrechen. `ellmer` löst beides mit
+`parallel_chat_structured()`.
+
+### Parallelität: mehrere Calls gleichzeitig
+
+Eine sequenzielle Schleife sendet eine Anfrage, wartet auf die
+Antwort, sendet die nächste. `parallel_chat_structured()` feuert
+mehrere Calls gleichzeitig ab und sammelt die Antworten in einem
+Tibble. Bei der GWDG würden parallele Calls allein das
+Minutenlimit von 10/min reißen - also drosseln wir zusätzlich
+clientseitig. Steuerparameter:
+
+- **`max_active`** - wie viele Calls gleichzeitig im Flug sind.
+- **`rpm`** (requests per minute) - clientseitige Drossel über
+  ein rollendes Minutenfenster; `ellmer` wartet automatisch, wenn
+  das Budget aufgebraucht ist.
+
+Für den GWDG-Endpunkt sind die Defaults von `ellmer`
+(`max_active = 10`, `rpm = 500`) deutlich zu großzügig. Wir setzen
+beide so, dass sie das GWDG-Minutenlimit von 10 Calls/min
+respektieren:
+
+```{r, eval=FALSE}
+# anzeigen ist hier ein Platzhalter: ein Tibble mit Spalten refnr
+# und stellenbeschreibung. In der Workshop-Projektarbeit ist das
+# das vorbereitete `eigene_stadt_roh`.
+smp     <- anzeigen |> slice(1:10)
+prompts <- as.list(str_squish(smp$stellenbeschreibung))
+
+res <- parallel_chat_structured(
+  chat        = chat,
+  prompts     = prompts,
+  type        = anzeige_schema,
+  max_active  = 5,
+  rpm         = 10,
+  on_error    = "continue"
+)
+
+# res ist ein Tibble mit 10 Zeilen und allen Schema-Spalten.
+# Die refnr binden wir aus den Stammdaten dran:
+ergebnis <- bind_cols(smp |> select(refnr), res)
+glimpse(ergebnis)
+```
+
+Warum nicht einfach `max_active = 10` (das volle Minutenlimit)? Ein
+Burst von 10 simultanen Calls würde das Minutenlimit in unter einer
+Sekunde erschöpfen und 60 s Sperre auslösen. Mit `max_active = 5`
+verteilen sich die Requests besser über die Minute; rechnerisch ist
+das ein 5x-Speedup, empirisch sehen wir auf der GWDG-Plattform eher
+5x bis 7x (Server-Overhead skaliert nicht linear).
+
+Zwei Detail-Konventionen:
+
+- **`prompts` als Liste, nicht als Vektor.** Ein Character-Vektor
+  wirft einen Type-Error; `as.list()` reicht zum Konvertieren.
+- **Volltext senden, nicht trunkieren.** Qwen 3.5-122B hat 256 k
+  Token Kontext - das reicht für jede einzelne Stellenanzeige
+  problemlos. `str_squish()` ist sinnvoll, um Whitespace und
+  Zeilenumbrüche zu normalisieren, aber **nichts** abzuschneiden.
+
+### Fehlertoleranz: `on_error = "continue"`
+
+Der ellmer-Default ist `on_error = "stop"` - ein einziger gescheiterter
+Call (Netz-Timeout, Server-`5xx`, Schema-Mismatch) bricht den
+ganzen Batch ab und Sie verlieren die schon erfolgreich
+klassifizierten Calls.
+
+Mit `on_error = "continue"` landet die entsprechende Zeile als NA
+in der Ergebnis-Tibble; der Rest des Batches läuft weiter. Sie
+können danach gezielt die NA-Zeilen identifizieren und einzeln
+nachbearbeiten, statt blind alles neu zu starten.
+
+### Array-Felder landen als list-columns
+
+Schema-Felder vom Typ `type_array(...)` - in unserem Mini-Schema
+`sprachen` - landen in der Ergebnis-Tibble als **list-columns**:
+jede Zelle enthält nicht einen Wert, sondern einen Charactervektor.
+
+Für Wort-Aggregate (z.B. die Top-5-Sprachen über den ganzen
+Datensatz) müssen Sie die list-column vorher auflösen. Schneller
+Weg:
+
+```{r, eval=FALSE}
+ergebnis$sprachen |>
+  unlist() |> str_trim() |> tolower() |> table() |>
+  sort(decreasing = TRUE) |> head(5)
+```
+
+Eleganter über `unnest_longer()` aus `tidyr` - mehr dazu im
+Abschnitt zur Text-Aufbereitung unten.
+
+### Und in RMarkdown: `eval = FALSE`
+
+In RMarkdown-Berichten bekommen API-Chunks routinemäßig
+`eval = FALSE`, sonst verbrennt jeder Knit die GWDG-Quota neu. Die
+Klassifikation läuft einmal interaktiv, das Ergebnis wird per
+`saveRDS()` persistiert, und der Knit liest das RDS. Dasselbe
+Muster nutzen wir auch in diesem Tutorial für alle Live-Calls.
+
+## 8. Cache-Resume: lange Läufe überleben Unterbrechungen
+
+Bei 400 Anzeigen kommen Sie mit dem Minutenlimit theoretisch in
+40 Minuten durch - das Stunden- und Tageslimit erzwingen aber
+Pausen, und in der Praxis verteilen sich Läufe oft über mehrere
+Tage. Sie brauchen ein Verfahren, das eine unterbrochene
+Klassifikation **nahtlos fortsetzen** kann.
+
+Das Muster: nach jedem Batch das Zwischenergebnis als RDS
+speichern; beim Start prüfen, welche `refnr`s schon im Cache liegen,
+und nur die noch offenen klassifizieren.
+
+### Live-Demonstration: 100 Augsburg-Anzeigen klassifizieren
+
+Wir demonstrieren das Muster auf 100 Anzeigen aus dem vorbereiteten
+Augsburg-Korpus. Beim ersten Knit feuert der Loop tatsächlich rund
+100 GWDG-Calls ab; jedes weitere Knit liest aus dem Cache und kommt
+ohne neue Calls aus.
+
+```{r daten-laden}
+roh <- readRDS(augsburg_pfad)
+
+set.seed(20260613)
+anzeigen <- roh |>
+  filter(hat_text) |>
+  slice_sample(n = 100) |>
+  select(refnr, titel, beruf, stellenbeschreibung)
+
+dim(anzeigen)
+```
+
+Die Cache-Resume-Funktion: lädt den Cache (falls vorhanden),
+identifiziert die noch nicht klassifizierten `refnr`s und schickt
+nur die offenen an die GWDG. Beim Wiedereinstieg wird **kein** Call
+doppelt verbraucht.
+
+```{r klassifiziere-batch}
+klassifiziere_batch <- function(batch, cache_pfad, max_active = 5) {
+  # Vorhandenen Cache laden (oder leeres Tibble starten)
+  cache   <- if (file.exists(cache_pfad)) readRDS(cache_pfad) else tibble()
+  fertige <- if (nrow(cache)) cache$refnr else character(0)
+
+  # Nur die refnr-Zeilen klassifizieren, die noch fehlen
+  offen <- batch |> filter(!refnr %in% fertige)
+  if (nrow(offen) == 0) {
+    message("Cache vollständig - keine neuen Calls nötig.")
+    return(cache)
+  }
+  message("Klassifiziere ", nrow(offen), " neue Anzeigen ...")
+
+  prompts <- as.list(str_squish(offen$stellenbeschreibung))
+  res <- parallel_chat_structured(
+    chat = chat, prompts = prompts, type = anzeige_schema,
+    max_active = max_active, rpm = 10, on_error = "continue"
+  )
+
+  # Neue Ergebnisse an den Cache anhängen und persistieren
+  alle <- bind_rows(cache,
+                    bind_cols(offen |> select(refnr, titel, beruf), res))
+  saveRDS(alle, cache_pfad, compress = "gzip")
+  alle
+}
+```
+
+Jetzt der eigentliche Aufruf. 100 Calls bei `max_active = 5` und
+`rpm = 10` brauchen rund zehn Minuten - das passt komfortabel in
+das Stundenlimit, sodass wir hier mit einem einzigen Batch
+auskommen. Würden Sie stattdessen 400 Anzeigen klassifizieren,
+zerlegen Sie das in vier 100er-Batches mit jeweils 30 Minuten
+Pause - die Logik der Funktion bleibt identisch.
+
+```{r live-klassifikation}
+ergebnis <- klassifiziere_batch(anzeigen, cache_pfad)
+
+# Wie viele Zeilen liegen jetzt im Cache?
+nrow(ergebnis)
+```
+
+Ein kurzer Blick in die ersten Zeilen - die Schema-Felder sind
+echte R-Typen, `sprachen` ist eine list-column:
+
+```{r ergebnis-glimpse}
+glimpse(ergebnis)
+```
+
+### Drei Gründe, warum sich der Cache-Resume-Loop lohnt
+
+- **Crash-Recovery:** Fällt ein Batch aus (Strom weg, R-Session
+  hängt, GWDG-Wartung), sind die bereits klassifizierten Calls
+  schon im Cache. Beim Wiedereinstieg werden sie übersprungen.
+- **Rate-Limit-Resilienz:** Pausen zwischen Batches entlasten das
+  Stunden- und Minutenlimit, ohne dass Sie das Skript abbrechen
+  müssen.
+- **Arbeiten über mehrere Tage** (der häufigste Fall hier): Wenn
+  Sie heute 200 Anzeigen klassifizieren und morgen die restlichen
+  200, schließen Sie morgen einfach R wieder auf, starten das
+  Skript neu - der Cache enthält die ersten 200 Refnrn, der Loop
+  klassifiziert nur die offenen.
+
+## 9. Rate-Limits planen
+
+Der GWDG-Schlüssel hat klar definierte Grenzen (Stand 2026,
+wiederholt aus Abschnitt 2 zur schnellen Referenz):
+
+| Fenster | Limit |
+|---|---|
+| Minute | 10 Calls |
+| Stunde | 200 Calls |
+| Tag    | 400 Calls |
+| Monat  | 3.000 Calls |
+
+Diese vier Limits greifen **gleichzeitig**. Wenn Sie eine Laufzeit
+abschätzen wollen, ist das langsamste der vier Limits maßgeblich:
+
+- **Stundenlimit erzwingt Pausen.** Ein 100er-Batch braucht mit
+  `rpm = 10` rund zehn Minuten (das Minutenlimit ist die bindende
+  Größe). Sie könnten also theoretisch zwei Batches pro Stunde
+  fahren - genau die 200 Calls des Stundenlimits. Mehr als zwei
+  Batches in einer Stunde laufen unweigerlich in die 429-Sperre.
+- **Tageslimit deckelt auf 400.** Ein einzelner Tag erlaubt also
+  vier Batches à 100, mit jeweils mindestens 30 Minuten Pause.
+- **Monatslimit erzwingt den Pilot.** Bei 3.000 Calls/Monat und
+  2.000 produktiven Calls (zentrale Klassifikation für die
+  Projekt-Referenz) bleibt nur rund **1.000 Calls Puffer** für
+  Pilotläufe, Re-Runs nach Schemaänderungen und Debug-Calls. Das
+  ist der eigentliche Grund, warum man die Pipeline erst auf einem
+  20er-Sample validiert und dann ein einziges Mal sauber
+  durchzieht.
+
+Eine grobe Laufzeit-Rechnung als Daumenregel: bei einem
+Subsample von **2.000 Anzeigen** und 400 Calls/Tag brauchen Sie
+`2000 / 400 = 5 Tage`, verteilt auf etwa **2 Batches pro Tag** mit
+mindestens 30 Minuten Pause. Das Monatslimit (3.000) hält das auch
+dann noch, wenn ein Batch komplett wiederholt werden muss.
+
+> **Tipp:** Das aktuelle Restbudget können Sie jederzeit ohne
+> "echten" Call abfragen - der Curl-Trick steht in **Anhang A**.
+
+## Text-Aufbereitung nach der Klassifikation
+
+Strukturierte Outputs sind robust auf der Feld-Ebene - aber
+**innerhalb** der Freitextfelder (Sprachen, Zitate, später auch
+Skill-Listen in Ihrem Projekt-Schema) liefert das Modell rohe
+Schreibweisen. "Englisch", " englisch ", "ENGLISCH", "english"
+müssen vor einer Aggregation auf eine gemeinsame Form gebracht
+werden, sonst zählen sie als unterschiedliche Werte.
+
+Drei Techniken decken die meisten Fälle ab; wir zeigen sie am
+`sprachen`-Feld unseres Mini-Schemas.
+
+### Schritt 1: List-columns auf Zeilen auflösen
+
+`type_array`-Felder sind list-columns. Wenn Sie pro Wert aggregieren
+wollen, müssen Sie sie in **eine Zeile pro Anzeige x Wert**
+überführen.
+
+Liegt die Spalte bereits als list-column vor (Standardfall bei
+`parallel_chat_structured()`):
+
+```{r, eval=FALSE}
+library(tidyr)
+
+sprachen_long <- ergebnis |>
+  select(refnr, sprachen) |>
+  unnest_longer(sprachen)
+```
+
+Steht stattdessen ein **Delimiter-getrennter String** in der Zelle
+(z.B. weil ein älteres Schema einen `type_string()` statt
+`type_array()` lieferte), ist `separate_longer_delim()` die
+idiomatische Lösung:
+
+```{r, eval=FALSE}
+sprachen_long <- ergebnis |>
+  filter(!is.na(sprachen_string), sprachen_string != "") |>
+  select(refnr, sprachen_string) |>
+  separate_longer_delim(sprachen_string, delim = ";")
+```
+
+`separate_longer_delim()` ist kürzer und lesbarer als die ältere
+Kombination `strsplit()` + `unnest_longer()` und
+der bevorzugte Weg.
+
+### Schritt 2: Schreibweise vereinheitlichen
+
+Zwei Zeilen reichen, um Whitespace und Groß-Klein-Unterschiede
+einzuebnen:
+
+```{r, eval=FALSE}
+sprachen_long <- sprachen_long |>
+  mutate(sprachen = str_squish(tolower(sprachen))) |>
+  filter(nchar(sprachen) > 1)
+```
+
+- `str_squish()` schluckt führende, abschließende und doppelte
+  Leerzeichen - inklusive Zeilenumbrüchen.
+- `tolower()` macht aus "Englisch", "englisch" und "ENGLISCH"
+  denselben Wert.
+- `filter(nchar(...) > 1)` wirft Einzelzeichen und leere Reste
+  raus, die durch das Splitten an Mehrfach-Delimitern (`";;"`)
+  entstehen können.
+
+### Schritt 3: Kategorisieren mit `case_when()` + `str_detect()`
+
+Aus den vereinheitlichten Werten bilden Sie nun qualitative
+Kategorien - z.B. eine Dreiteilung Deutsch / Englisch /
+Sonstiges:
+
+```{r, eval=FALSE}
+sprachen_long <- sprachen_long |>
+  mutate(kategorie = case_when(
+    str_detect(sprachen, "deutsch|german")              ~ "Deutsch",
+    str_detect(sprachen, "englisch|english")            ~ "Englisch",
+    TRUE                                                 ~ "Sonstige"
+  ))
+```
+
+Drei Konventionen zu `case_when()` + `str_detect()`:
+
+1. **Spezifischer zuerst.** `case_when()` bewertet die Fälle der
+   Reihe nach. Enge Kategorien gehören nach oben, breite
+   Sammelkategorien nach unten, `TRUE ~ "Sonstiges"` als Fallback.
+2. **Regex-Vokabular klein und gepflegt.** Lange Listen mit `|`-
+   getrennten Stichworten reichen weit; Wortgrenzen (`\\b`) oder
+   Mehrfach-Whitespace (`\\s*`) helfen bei zusammengesetzten
+   Begriffen.
+3. **Fall-spezifische Schreibweisen.** Da Schritt 2 bereits
+   `tolower()` durchgezogen hat, können Sie die Regexe ohne
+   `(?i)`-Flag schreiben - alle Werte sind schon kleingeschrieben.
+
+Damit haben Sie aus einer freien Liste eine analyse-fähige
+Kategorie-Spalte gemacht - bereit für `count()`, `ggplot()` oder
+Gruppenvergleiche.
+
+## Best Practices
+
+1. **Evaluierung:** Prüfen Sie immer manuell ein Sample (z.B. 20
+   Datensätze) und vergleichen Sie Ihre Bewertung mit der des
+   Modells. Das ist die einzige seriöse Form der Validierung.
+2. **Konstruktvalidität:** Vergleichen Sie das Aggregat mit einer
+   externen Referenz - z.B. einer manuellen Goldstandard-Annotation
+   auf einem 50-100-Datensatz-Sample oder einer unabhängigen
+   Klassifikation durch eine andere Person oder ein anderes Modell.
+3. **Transparenz:** Dokumentieren Sie Modell-Name, Modell-Version,
+   `temperature`, Prompt und Schema. Reproduzierbarkeit verlangt
+   das.
+4. **Kosten und Quota:** Bei der GWDG ist das Monatslimit (3.000
+   Calls) die echte Grenze. Behalten Sie das im Blick, bevor Sie
+   Probeläufe wiederholen.
+5. **Halluzinationen.** LLMs erfinden gelegentlich Aussagen, auch
+   sehr selbstsicher. Strukturierte Outputs (`type_object()`)
+   reduzieren das Risiko deutlich (Enums sind hart), aber Felder
+   wie `ai_evidence` müssen Sie stichprobenartig prüfen - ist das
+   Zitat wirklich aus dem Anzeigentext?
+
+## Limitationen ehrlich benennen
+
+Stand Mitte 2026 sind LLMs in den meisten Domänen besser als
+klassische NLP, aber nicht perfekt. Insbesondere:
+
+- **Mess-Fehler korreliert mit Domain.** Gut strukturierte
+  IT-Anzeigen werden präziser klassifiziert als unstrukturierte
+  Pflege- oder Handwerksanzeigen. Der Messfehler ist also
+  systematisch, nicht zufällig.
+- **Konstrukt-Diskrepanz.** Was das LLM aus einer Anzeige liest
+  (z.B. `bildung`), ist nicht zwingend dasselbe wie ein offizielles
+  Bildungsniveau-Maß (z.B. das Anforderungsniveau der KldB-2010).
+  Anzeigentexte beschreiben ein *Wunschprofil*, externe Statistiken
+  ein *realisiertes Niveau* - beim Interpretieren sollten Sie das
+  trennen.
+- **Modell-Drift.** Auch bei `temperature = 0` sind Antworten nicht
+  zu 100 % deterministisch. Modell-Updates beim Anbieter können
+  einzelne Labels kippen. Dokumentieren Sie deshalb Datum und
+  Modell-Version.
+
+In diesem Sinne: frohes Klassifizieren mit `ellmer` und der GWDG!
+
+## Anhang A: Aktuelles Restbudget per curl abfragen
+
+Das aktuelle Restbudget können Sie jederzeit prüfen, ohne einen
+"echten" Call zu verbrauchen - mit einem leeren Request an
+`https://saia.gwdg.de/v1/chat/completions`. Die Antwort ist HTTP
+400 (Body fehlt), die Rate-Limit-Header werden aber mitgeliefert:
+
+```bash
+curl -i -H "Authorization: Bearer $GWDG_API_KEY" \
+     -H "Content-Type: application/json" \
+     https://saia.gwdg.de/v1/chat/completions
+```
+
+Interessante Header:
+
+- `x-ratelimit-remaining-minute` - frei in der laufenden Minute
+- `x-ratelimit-remaining-hour` - frei in der laufenden Stunde
+- `x-ratelimit-remaining-day` - frei am laufenden Tag
+- `x-ratelimit-remaining-month` - frei im laufenden Monat
+- `ratelimit-reset` - Sekunden bis zum nächsten Minuten-Reset
+
+**Achtung:** Auch der leere Probe-Call zählt mit (1 Slot je
+Aufruf). Sparsam einsetzen - nicht als Sekundentakt-Polling,
+sondern vor und nach größeren Lauf-Blöcken.
+
+## Anhang B: Eigene Anzeigen über die BA-Jobbörse laden
+
+In der Workshop-Projektarbeit (Stellenanzeigen-Klassifikation)
+werden die Roh-Anzeigen Ihrer Projektstadt bereits vorbereitet
+mitgeliefert (`eigene_stadt_roh`). Wer dennoch eigene Daten ziehen
+will - andere Stadt, anderer Umkreis, anderer Suchfilter - kann die
+folgende schlanke Pipeline nutzen.
+
+Die Bundesagentur für Arbeit (BA) stellt eine kostenlose REST-API
+mit allen offenen Stellen zur Verfügung. Sie hat zwei Endpunkte:
+
+- **Such-Endpoint** `https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs`
+  liefert eine paginierte Liste der offenen Stellen (Filter: Ort,
+  Umkreis, Veröffentlichungsdatum, ...). Pro Seite max. 100
+  Treffer, insgesamt max. 10.000 Treffer pro Query.
+- **Detail-Endpoint** `https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobdetails/{base64(refnr)}`
+  liefert pro Anzeige u.a. das Feld `stellenangebotsBeschreibung`
+  mit dem Volltext.
+
+Beide Endpunkte verlangen den Header `X-API-Key: jobboerse-jobsuche`
+(öffentlicher Key, keine Registrierung nötig).
+
+### Schritt 1: Metadaten über den Such-Endpoint laden
+
+```{r, eval=FALSE}
+library(httr2)
+library(base64enc)
+
+ba_search_url <- "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs"
+ba_api_key    <- "jobboerse-jobsuche"   # öffentlicher Header-Key
+
+# Eine paginierte Suche an die BA-API.
+# Wichtig: timeout + retry, sonst klemmt es bei transienten Server-Fehlern.
+ba_suche <- function(wo, umkreis = 5, size = 100, page = 1) {
+  request(ba_search_url) |>
+    req_headers("X-API-Key" = ba_api_key) |>
+    req_url_query(angebotsart = 1, wo = wo,
+                  umkreis = umkreis, size = size, page = page) |>
+    req_timeout(30) |>
+    req_retry(max_tries = 4,
+              backoff = function(i) min(2^i, 20),
+              is_transient = function(r) {
+                is.null(r) || resp_status(r) %in% c(429, 500, 502, 503, 504)
+              }) |>
+    req_error(is_error = function(r) FALSE) |>
+    req_perform()
+}
+
+# Metadaten der ersten 100 Treffer für Ulm + 5 km Umkreis
+resp <- ba_suche("Ulm", umkreis = 5, size = 100, page = 1)
+stopifnot(resp_status(resp) == 200)
+postings <- resp_body_json(resp)$stellenangebote
+
+# Aus der JSON-Liste eine flache Tibble bauen.
+meta <- map_dfr(postings, function(x) {
+  tibble(
+    refnr           = pluck(x, "refnr",       .default = NA_character_),
+    titel           = pluck(x, "titel",       .default = NA_character_),
+    beruf           = pluck(x, "beruf",       .default = NA_character_),
+    arbeitgeber     = pluck(x, "arbeitgeber", .default = NA_character_),
+    ort             = pluck(x, "arbeitsort", "ort", .default = NA_character_),
+    veroeffentlicht = pluck(x, "aktuelleVeroeffentlichungsdatum",
+                            .default = NA_character_)
+  )
+}) |>
+  filter(!is.na(refnr), refnr != "") |>
+  distinct(refnr, .keep_all = TRUE)
+```
+
+### Schritt 2: Volltexte über den Detail-Endpoint laden
+
+Die Metadaten enthalten Berufstitel und Arbeitgeber, aber **noch
+keinen Anzeigentext**. Den holen wir je Refnr aus dem Detail-
+Endpoint:
+
+```{r, eval=FALSE}
+ba_detail_url <- "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobdetails"
+
+# Eine refnr -> Volltext. Bei Fehler: NA, damit der Loop nicht abbricht.
+fetch_detail <- function(refnr) {
+  enc <- base64enc::base64encode(charToRaw(refnr))
+  res <- tryCatch(
+    request(paste0(ba_detail_url, "/", enc)) |>
+      req_headers("X-API-Key" = ba_api_key) |>
+      req_timeout(30) |>
+      req_retry(max_tries = 4, backoff = function(i) min(2^i, 20)) |>
+      req_error(is_error = function(r) FALSE) |>
+      req_perform(),
+    error = function(e) NULL
+  )
+  if (is.null(res) || resp_status(res) != 200) return(NA_character_)
+  pluck(resp_body_json(res), "stellenangebotsBeschreibung",
+        .default = NA_character_)
+}
+
+# Loop über alle Refnrs. Mit Sys.sleep(0.3) bleibt die BA-API
+# entspannt; bei 100 Anzeigen sind das ~30-40 Sekunden Wartezeit.
+texte <- character(nrow(meta))
+for (i in seq_len(nrow(meta))) {
+  texte[i] <- fetch_detail(meta$refnr[i])
+  if (i %% 20 == 0) cat("  ", i, "/", nrow(meta), "\n")
+  Sys.sleep(0.3)
+}
+
+# Volltext an die Metadaten anhängen + nur Anzeigen mit Text behalten.
+anzeigen <- meta |>
+  mutate(
+    stellenbeschreibung = texte,
+    textlaenge          = nchar(texte),
+    hat_text            = !is.na(texte) & texte != ""
+  ) |>
+  filter(hat_text)
+```
+
+### Schritt 3: Persistieren
+
+```{r, eval=FALSE}
+# In einer größeren Anwendung würden Sie noch Pagination (mehrere
+# Seiten) und Resume-Caching ergänzen. Für Demo-Zwecke reicht das
+# einmalige Persistieren als RDS:
+saveRDS(anzeigen, "anzeigen.rds")
+```
+
+Beim nächsten Lauf laden Sie die Anzeigen direkt mit `readRDS(...)`,
+statt erneut zu downloaden.
+
+## Weiterführende Ressourcen
+
+- **ellmer-Dokumentation:** https://ellmer.tidyverse.org/
+- **ellmer Structured Data Vignette:** https://ellmer.tidyverse.org/articles/structured-data.html
+- **GWDG Chat-AI Dokumentation:** https://docs.hpc.gwdg.de/services/chat-ai/index.html
+- **GWDG Verfügbare Modelle:** https://docs.hpc.gwdg.de/services/chat-ai/models/index.html
+- **Ties de Kok (2025) "ChatGPT for Textual Analysis? How to Use Generative LLMs in Accounting Research", Management Science.** https://doi.org/10.1287/mnsc.2023.03253 - lesenswert für weitere Prompt-Engineering-Techniken
+- **BA-Jobbörse-API (Datenquelle):** https://jobsuche.api.bund.dev/

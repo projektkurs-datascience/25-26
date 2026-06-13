@@ -51,6 +51,8 @@ navbar:
         href: ./tutorials/Review_Reports.html
       - text: "Feedback zu den Review Reports"
         href: ./tutorials/Gruppenfeedback.html
+      - text: "GWDG mit API"
+        href: ./tutorials/zero-prompting.html
       - text: "Teambuilding Guidlines"
         href: ./tutorials/Team-Guidelines.html
       - text: "Quellen und KI Guidelines"

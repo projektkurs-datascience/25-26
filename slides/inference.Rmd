@@ -517,14 +517,14 @@ Fehler 2. Art: Sie lehnen die Nullhypothese _nicht_ ab, obwohl sie falsch ist
 
 Beispiel zu Fehler 1. Art: 
 
-- Im Beispiel mit den Studenten würde ein Fehler 1. Art bedeuten, das Sie schlussfolgern die Erinnerung der Studenten an die Sparmöglichkeit hat keinen Einfluss auf deren Verhalten, trotz des Ergebnisses aus den Daten.
+- Die Erinnerung an die Sparmöglichkeit hat in Wirklichkeit keinen Einfluss auf das Kaufverhalten. Die Stichprobe zeigt zufällig einen Unterschied, wir verwerfen $H_0$ und schließen fälschlich auf eine Wirkung.
 - Eine Bank vergibt einen Kredit an einen eigentlich nicht kreditwürdigen Kunden. Der Kredit fällt aus und die Bank hat einen Fehler 1. Art begangen. (Tatsächlicher Verlust)
 
 --
 
 Beispiel zu Fehler 2. Art:
 
-- Wenn die Erinnerung der Studenten an die Sparmöglichkeit in Wirklichkeit keine Auswirkung auf ihre Entscheidung hat, wir jedoch auf Grund der Daten die Nullhypothese verwerfen begehen wir einen Fehler 2. Art.
+- Die Erinnerung der Studierenden an die Sparmöglichkeit senkt tatsächlich die Kaufwahrscheinlichkeit, der Test wird aber nicht signifikant. Wir behalten $H_0$ bei und übersehen den vorhandenen Effekt.
 - Eine Bank kommt nach ihrer Analyse zu dem Schluss, dass der Kunde nicht kreditwürdig ist und vergibt somit den Kredit nicht. Hätte die Bank jedoch besser hin geschaut, dann hätte Sie erkannt, dass der Kunde kreditwürdig gewesen ist Die Bank beging hier einen Fehler 2. Art. (Opportunitätskosten)
 
 ---
